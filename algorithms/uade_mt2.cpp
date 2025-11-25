@@ -1,0 +1,428 @@
+//
+// Created by qq328 on 2025/11/17.
+//
+
+#include "uade_mt2.h"
+#include "../eval_func.h"
+#include "../Benchmarks.h"
+#include <chrono>
+#include <atomic>
+#include <omp.h>
+#include <random>
+
+/*
+  SHADE 1.1 implemented by C++ for Special Session & Competition on Real-Parameter Single Objective Optimization at CEC-2014
+
+  Version: 1.1   Date: 9/Jun/2014
+  Written by Ryoji Tanabe (rt.ryoji.tanabe [at] gmail.com)
+*/
+
+
+#include <algorithm>
+#include <functional>
+#include <unordered_set>
+
+Fitness UADE_MT::run()
+{
+  cout << scientific << setprecision(8);
+  // string fname = g_fname;
+  // fout.open(fname + "_f.dat");
+  // fout.precision(dbl::max_digits10);
+
+  //cout << scientific << setprecision(8);
+  initializeParameters();
+  setSHADEParameters();
+  constexpr int batch_size = 100;
+  vector<pair<Fitness, Individual>> pop;
+  vector<Individual> children(batch_size, nullptr);
+  // variable child[problem_size];
+  vector<Fitness> children_fitness(pop_size, 0);
+  // Fitness child_fitness;
+  variable bsf_solution[problem_size];
+  Fitness bsf_fitness;
+  atomic nfes = 0;
+  vector<Benchmarks*> benchmarks;
+  vector<mt19937> generators;
+  random_device rd;
+  for (int i = 0; i < batch_size; ++i) {
+    benchmarks.push_back(generateFuncObj(function_number));
+    benchmarks[i]->nextRun();
+    children[i] = (variable*)malloc(sizeof(variable) * problem_size);
+    generators.emplace_back(rd());
+  }
+
+  //unordered_set<DoubleRegion> popset;
+  //int duplicate_count = 0;
+
+  for (int i = 0; i < pop_size; ++i)
+  {
+    //initialize population
+    pop.push_back({0, makeNewIndividual()});
+    //children.push_back((variable *)malloc(sizeof(variable) * problem_size));
+
+    /*DoubleRegion dr;
+    dr.p = (variable *)malloc(sizeof(variable) * problem_size);
+    for (int j = 0; j < problem_size; j++)
+      dr.p[j] = pop.back().second[j];
+    dr.size = problem_size;
+    dr.nfes = nfes;
+    dr.parent = 0;
+    popset.emplace(dr);*/
+    //evaluate the initial population
+    pop[i].first = eval_sol(pop[i].second);
+    // cec14_test_func(pop[i].second, &pop[i].first, problem_size, 1, function_number);
+
+    if ((pop[i].first - optimum) < epsilon)
+      pop[i].first = optimum;
+
+    if (i==0 || (pop[i].first < bsf_fitness) )
+    {
+      bsf_fitness = pop[i].first;
+      for (int j = 0; j < problem_size; j++)
+        bsf_solution[j] = pop[i].second[j];
+    }
+
+    ++nfes;
+    // fout << pop[i].first << ',' << nfes << ',' << i << ',' << -1 << ',' << pop_size << ',' << 0.5 << ',' << 0.5 << endl;
+    if (nfes >= max_num_evaluations)
+      break;
+  }
+
+  int num_success_params;
+  variable mu_sf, mu_cr;
+  int mu_ps;
+  vector<variable> success_sf;
+  vector<variable> success_cr;
+  vector<int> success_ps;
+  vector<variable> dif_fitness;
+
+  // the contents of M_f and M_cr are all initialiezed 0.5
+  vector<variable> memory_sf(memory_size, 0.5);
+  vector<variable> memory_cr(memory_size, 0.5);
+  vector<variable> memory_ps(memory_size, pop_size);
+
+  variable temp_sum_sf;
+  variable temp_sum_cr;
+  variable temp_sum_ps;
+  variable sum;
+  variable weight;
+
+  mutex mtx;
+
+  //memory index counter
+  int memory_pos = 0;
+
+  //for new parameters sampling
+  int random_selected_period;
+  vector<variable> pop_sf(batch_size);
+  vector<variable> pop_cr(batch_size);
+  vector<int> pop_ps(batch_size);
+
+  //for current-to-pbest/1
+  int p_best_ind[batch_size], base[batch_size], r1[batch_size], r2[batch_size];
+  int p_num = round(pop_size * p_best_rate);
+  vector<tuple<Fitness, Individual, int>> pbests;
+  for (int i = 0; i < p_num; ++i)
+  {
+    pbests.push_back({pop[i].first, (variable *)malloc(sizeof(variable) * problem_size),i});
+    for (int j = 0; j < problem_size; j++)
+      get<1>(pbests.back())[j] = pop[i].second[j];
+  }
+  make_heap(pbests.begin(), pbests.end());
+  for (int i = p_num; i < pop_size; ++i)
+  {
+    if (pop[i].first < get<0>(pbests[0]))
+    {
+      pop_heap(pbests.begin(), pbests.end());
+      get<0>(pbests.back()) = pop[i].first;
+      for (int j = 0; j < problem_size; j++)
+        get<1>(pbests.back())[j] = pop[i].second[j];
+      get<2>(pbests.back()) = i;
+      push_heap(pbests.begin(), pbests.end());
+    }
+  }/**/
+
+  //------------------------------------------
+  // for linear population size reduction
+  int max_pop_size = pop_size * 20;
+  int min_pop_size = 100;
+
+
+
+// #define CHRONO
+#ifdef CHRONO
+  using Clock = std::chrono::high_resolution_clock;
+  auto t_loop_start = Clock::now();
+#endif
+  //main loop
+  while (nfes < max_num_evaluations) {
+#ifdef CHRONO
+    auto t_parallel_start = Clock::now();
+    chrono::time_point<chrono::system_clock, chrono::system_clock::duration> t_p0_start, t_p1_start, t_p2_start;
+#endif
+    //for (int target = 0; target < pop_size; target++)
+    // omp_set_num_threads(8);
+#pragma omp parallel for private(mu_sf, mu_cr, mu_ps, random_selected_period) schedule(static)
+    for (int target = 0; target < batch_size; target++) {
+      //In each generation, CR_i and F_i used by each individual x_i are generated by first selecting an index r_i randomly from [1, H]
+      random_selected_period = generators[target]() % memory_size;
+      mu_sf = memory_sf[random_selected_period];
+      mu_cr = memory_cr[random_selected_period];
+      mu_ps = memory_ps[random_selected_period];
+      //generate CR_i and repair its value
+      if (mu_cr == -1)
+      {
+        pop_cr[target] = 0;
+      } else {
+        pop_cr[target] = gauss(mu_cr, 0.1);
+        if (pop_cr[target] > 1) pop_cr[target] = 1;
+        else if (pop_cr[target] < 0) pop_cr[target] = 0;
+      }
+
+      //generate F_i and repair its value
+      do {
+        pop_sf[target] = cauchy_g(mu_sf, 0.1);
+      } while (pop_sf[target] <= 0);
+      if (pop_sf[target] > 1) pop_sf[target] = 1;
+
+      //generate PS_i and repair its value
+      //pop_ps[target] = pop_size; //fixed-size
+      pop_ps[target] = (int)gauss(mu_ps, 10);
+      if (pop_ps[target] < min_pop_size) pop_ps[target] = min_pop_size;
+      else if (pop_ps[target] > (int)pop.size()) pop_ps[target] = (int)pop.size();
+      else if (pop_ps[target] > max_pop_size) pop_ps[target] = max_pop_size;/**/
+
+      //p-best individual is randomly selected from the top pop_size *  p_i members
+      //p_best_ind = rand() % p_num;
+    }
+    // omp_set_num_threads(8);
+#pragma omp parallel for schedule(static)
+    for (int target = 0; target < batch_size; target++) {
+      int tournament = round((int)pop.size() / pop_ps[target]) * 7;
+      // cout << tournament << endl;
+      p_best_ind[target] = (int)pop.size() - 1 - generators[target]() % (int)(pop.size() * p_best_rate); //v60
+      for (int t = 1; t < tournament; t++)
+      {
+        double tmp = (int)pop.size() - 1 - generators[target]() % (int)(pop.size() * p_best_rate);  // ver60
+        if (pop[tmp].first < pop[p_best_ind[target]].first)
+          p_best_ind[target] = tmp;
+      } /**/
+    }
+    // omp_set_num_threads(8);
+#pragma omp parallel for schedule(static)
+    for (int target = 0; target < batch_size; target++) {
+      int tournament = round((int)pop.size() / pop_ps[target]) * 7, candidate[3];
+      for (int i = 0; i < 3; i++)
+      {
+        candidate[i] = generators[target]() % (int)pop.size();
+        for (int t = 1; t < tournament; t++)
+        {
+          double tmp = generators[target]() % (int)pop.size();
+          bool flag = false;
+          do {
+            flag = true;
+            for (int j = 0; j < i; j++) {
+              if (tmp == candidate[j]) {
+                flag = false;
+                tmp = generators[target]() % (int)pop.size();
+                break;
+              }
+            }
+          } while (!flag);
+          if (pop[tmp].first < pop[candidate[i]].first)
+            candidate[i] = tmp;
+          //if ((pop[tmp].first < pop[candidate[i]].first) && tmp < candidate[i-1]) candidate[i] = tmp; // av69
+        }
+      } /**/
+      base[target] = candidate[0];
+      r1[target] = candidate[1];
+      r2[target] = candidate[2];
+    }
+    // omp_set_num_threads(8);
+#pragma omp parallel for schedule(static)
+    for (int target = 0; target < batch_size; target++) {
+      operateCurrentToPBest1BinWithArchive(pop, pbests, children[target], base[target], p_best_ind[target], r1[target], r2[target], pop_sf[target], pop_cr[target], generators[target]);
+      // int random_variable = rand() % problem_size;
+      // for (int i = 0; i < problem_size; i++) {
+      //   if ((randDouble() < pop_cr[target]) || (i == random_variable)) {
+      //     //child[i] = pop[target].second[i] + scaling_factor * (get<1>(pbests[p_best_individual])[i] - pop[target].second[i]) + scaling_factor * (pop[r1].second[i] - pop[r2].second[i]);
+      //     children[target][i] = pop[target].second[i] + pop_sf[target] * (pop[p_best_ind[target]].second[i] - pop[target].second[i]) + pop_sf[target] * (pop[r1[target]].second[i] - pop[r2[target]].second[i]);
+      //   } else  {
+      //     children[target][i] = pop[target].second[i];
+      //   }
+      // }
+      // //If the mutant vector violates bounds, the bound handling method is applied
+      // modifySolutionWithParentMedium(children[target],  pop[target].second);
+    }
+    // omp_set_num_threads(16);
+#pragma omp parallel for schedule(static)
+    for (int target = 0; target < batch_size; target++) {
+      // evaluate the children's fitness values
+      children_fitness[target] = benchmarks[target]->compute(children[target]);
+      // cec14_test_func(child, &child_fitness, problem_size, 1, function_number);
+      ++nfes;
+      if (children_fitness[target] - optimum < epsilon) {
+        children_fitness[target] = optimum;
+      }
+    }
+#ifdef CHRONO
+    auto t_parallel_end = Clock::now();
+    if (nfes % 10000 == 0) {
+      cout << "Function " << function_number << " Evaluation " << nfes <<" Population Size " << pop.size() << " Best " << bsf_fitness << " Time " << (long long)((chrono::duration<double>(t_parallel_end - t_parallel_start).count()) * 1000) << " ms" << endl;
+    }
+#endif
+    for (int target = 0; target < batch_size; target++) {
+      if (children_fitness[target] - optimum < epsilon)
+        children_fitness[target] = optimum;
+      if (children_fitness[target] < bsf_fitness)
+      {
+        bsf_fitness = children_fitness[target];
+        for (int j = 0; j < problem_size; j++)
+          bsf_solution[j] = children[target][j];
+      }
+      //generation alternation
+      if (children_fitness[target] < pop[base[target]].first)
+      {
+        // fout << child_fitness << ',' << nfes << ',' << pop.size() << ',' << base << ',' << pop_ps[target] << ',' << pop_sf[target] << ',' << pop_cr[target] << endl;
+        if (nfes < max_num_evaluations) {
+
+          //insert child to population
+          pop.push_back({children_fitness[target], (variable *)malloc(sizeof(variable) * problem_size)});
+          for (int j = 0; j < problem_size; j++)
+            pop.back().second[j] = children[target][j];
+
+          //successful parameters are preserved in S_F and S_CR
+          success_sf.push_back(pop_sf[target]);
+          success_cr.push_back(pop_cr[target]);
+          success_ps.push_back(pop_ps[target]);
+          dif_fitness.push_back(fabs(pop[base[target]].first - children_fitness[target]));
+        }
+      }
+    }
+
+
+    if (bsf_fitness - optimum < epsilon) {
+      bsf_fitness = optimum;
+      break;
+    }
+    if (nfes >= max_num_evaluations)
+      break;
+
+    // if numeber of successful parameters > 0, historical memories are updated
+    num_success_params = success_sf.size();
+    if (num_success_params > 0) {
+      memory_sf[memory_pos] = 0;
+      memory_cr[memory_pos] = 0;
+      memory_ps[memory_pos] = 0;
+      temp_sum_sf = 0;
+      temp_sum_cr = 0;
+      temp_sum_ps = 0;
+      sum = 0;
+
+      for (int i = 0; i < num_success_params; i++) sum += dif_fitness[i];
+
+      //weighted lehmer mean
+      for (int i = 0; i < num_success_params; i++) {
+        weight = dif_fitness[i] / sum;
+
+        memory_sf[memory_pos] += weight * success_sf[i] * success_sf[i];
+        temp_sum_sf += weight * success_sf[i];
+
+        memory_cr[memory_pos] += weight * success_cr[i] * success_cr[i];
+        temp_sum_cr += weight * success_cr[i];
+
+        memory_ps[memory_pos] += weight * success_ps[i] * success_ps[i];
+        temp_sum_ps += weight * success_ps[i];
+      }
+
+      memory_sf[memory_pos] /= temp_sum_sf;
+
+      if (temp_sum_cr == 0 || memory_cr[memory_pos] == -1) memory_cr[memory_pos] = -1;
+      else memory_cr[memory_pos] /= temp_sum_cr;
+
+      if (temp_sum_ps > 0)
+      {
+        memory_ps[memory_pos] /= temp_sum_ps;
+      }
+      //if ((int)pop.size() < max_pop_size) memory_ps[memory_pos] = max_pop_size; //uPADE11
+
+      //pop_size = memory_ps[memory_pos]; // for test
+
+      //increment the counter
+      memory_pos++;
+      if (memory_pos >= memory_size) memory_pos = 0;
+
+      //clear out the S_F, S_CR and delta fitness
+      success_sf.clear();
+      success_cr.clear();
+      success_ps.clear();
+      dif_fitness.clear();
+    }
+
+    // linear population reduction
+    pop_size = memory_ps[memory_pos];
+    //pop_size = round((((min_pop_size - max_pop_size) / (double)max_num_evaluations) * nfes) + max_pop_size); //original
+    //pop_size = round((((min_pop_size - max_pop_size) / (double)max_num_evaluations) * nfes * 2) + max_pop_size); //half
+    //pop_size = round((((min_pop_size - max_pop_size) / (double)max_num_evaluations) * nfes / 2.) + max_pop_size); //double
+    //pop_size = round((((min_pop_size - max_pop_size) / (double)max_num_evaluations) * nfes / 4.) + max_pop_size); //quadruple
+
+    //pop_sf.resize(pop_size);
+    //pop_cr.resize(pop_size);
+    //pop_ps.resize(pop_size);
+
+    while (p_num > max(2., round(pop_size * p_best_rate))) {
+      pop_heap(pbests.begin(), pbests.end());
+      free(get<1>(pbests.back()));
+      pbests.pop_back();
+      --p_num;
+    }/**/
+  }
+#ifdef CHRONO
+  auto t_loop_end = Clock::now();
+  cout << "Total time: " << (int)(chrono::duration<double>(t_loop_end - t_loop_start).count() * 1000) << " ms" << endl;
+#endif
+  for (int i = 0; i < pop.size(); i++) {
+    //fout << pop[i].first << ',' << nfes << endl;
+    free(pop[i].second);
+  }
+
+  for (int i = 0; i < children.size(); i++)
+    free(children[i]);
+
+  for (int i = 0; i < p_num; i++) {
+    //fout << pbests[0].first << endl;
+    pop_heap(pbests.begin(), pbests.end());
+    free(get<1>(pbests.back()));
+    pbests.pop_back(); // removes the largest individual
+  }
+
+  /*for (auto itr=popset.begin(); itr!=popset.end(); itr++) {
+    free(itr->p);
+  }*/
+  fout.close();
+  for (int i = 0; i < batch_size; ++i)
+    delete benchmarks[i];
+  return bsf_fitness - optimum;
+}
+
+void UADE_MT::operateCurrentToPBest1BinWithArchive(const vector<pair<Fitness, Individual>> &pop, const vector<tuple<Fitness, Individual, int>> &pbests, Individual child, int &target, int &p_best_individual, int &r1, int &r2, variable &scaling_factor, variable &cross_rate, mt19937 &generator)
+{
+  int random_variable = generator() % problem_size;
+  for (int i = 0; i < problem_size; i++) {
+    if ((((double) generator() / generator.max()) < cross_rate) || (i == random_variable)) {
+      //child[i] = pop[target].second[i] + scaling_factor * (get<1>(pbests[p_best_individual])[i] - pop[target].second[i]) + scaling_factor * (pop[r1].second[i] - pop[r2].second[i]);
+      child[i] = pop[target].second[i] + scaling_factor * (pop[p_best_individual].second[i] - pop[target].second[i]) + scaling_factor * (pop[r1].second[i] - pop[r2].second[i]);
+    } else  {
+      child[i] = pop[target].second[i];
+    }
+  }
+  //If the mutant vector violates bounds, the bound handling method is applied
+  modifySolutionWithParentMedium(child,  pop[target].second);
+}
+
+void UADE_MT::setSHADEParameters() {
+  arc_rate = g_arc_rate;
+  arc_size = (int)round(pop_size * arc_rate);
+  p_best_rate = g_p_best_rate;
+  memory_size = g_memory_size;
+}
