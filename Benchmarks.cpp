@@ -27,7 +27,7 @@ Benchmarks::Benchmarks(){
 
   // minX = -100;
   // maxX = 100;
-  maxevals = 300000000;
+  maxevals = 3000000000;
   numevals = 2*maxevals;
   best_fitness = -1;
   unsigned int increm = maxevals/10;

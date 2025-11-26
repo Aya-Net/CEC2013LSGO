@@ -25,8 +25,8 @@ public:
                                       variable &scaling_factor,
                                       variable &cross_rate,
                                       mt19937 &generator,
-                                      ifstream& pop_ifs,
-                                      vector<streamoff>& offsets);
+                                      int pop_fd
+                                      );
   //void operateCurrentToPBest1BinWithArchive(const vector<Individual> &pop, Individual child, const deque<Individual> &archive, int &target, int &p_best_individual, int &r1, int &r2, variable &scaling_factor, variable &cross_rate);
   int arc_size;
   double arc_rate;

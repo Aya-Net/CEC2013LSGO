@@ -2,7 +2,7 @@
 // Created by qq328 on 2025/11/17.
 //
 
-#include "uade_mt3.h"
+#include "uade_mt4.h"
 #include "../eval_func.h"
 #include "../Benchmarks.h"
 #include <fcntl.h>
@@ -56,35 +56,33 @@ static ssize_t readAtOffset(int fd, void *buf, size_t bytesToRead, uint64_t offs
 }
 
 
-int addIndividualToDisk(const variable* data, ofstream & pop_ofs, vector<std::streamoff> & offsets, int problem_size) {
-  // unique_lock wlock(popfile_mtx);
-  // 在文件末尾追加一个个体，返回其索引（offsets.size()）
-  pop_ofs.seekp(0, std::ios::end);
-  std::streamoff pos = pop_ofs.tellp();
-  pop_ofs.write(reinterpret_cast<const char*>(data),
-                sizeof(variable) * problem_size);
-  pop_ofs.flush();
-  offsets.push_back(pos);
-  return static_cast<int>(offsets.size() - 1);
+int addIndividualToDisk(const variable* data, int pop_fd,
+                        std::atomic<std::size_t> &next_slot,
+                        int problem_size) {
+  std::size_t idx = next_slot.fetch_add(1, std::memory_order_relaxed);
+  uint64_t pos = (uint64_t) idx * sizeof(variable) * problem_size;
+  size_t bytes = sizeof(variable) * (size_t)problem_size;
+  ssize_t w = writeAtOffset(pop_fd, data, bytes, pos);
+  if (w != (ssize_t)bytes) return -1;
+
+  return static_cast<int>(idx);
 }
 
-void loadIndividual(int idx, variable* buffer, ifstream & pop_ifs, vector<std::streamoff> & offsets, int problem_size) {
-
-  // std::shared_lock<std::shared_mutex> rlock(popfile_mtx);
-  std::streamoff pos = (streamoff) idx * sizeof(variable) * problem_size;
-  pop_ifs.seekg(pos, std::ios::beg);
-  pop_ifs.read(reinterpret_cast<char*>(buffer),
-               sizeof(variable) * problem_size);
+void loadIndividual(int idx, variable* buffer, int pop_fd, int problem_size) {
+  uint64_t pos = (uint64_t) idx * sizeof(variable) * problem_size;
+  size_t bytes = sizeof(variable) * (size_t)problem_size;
+  ssize_t r = readAtOffset(pop_fd, buffer, bytes, pos);
+  if (r != (ssize_t)bytes) {
+    // optional: 处理读取错误
+    memset(buffer, 0, bytes);
+  }
 }
 
-void saveIndividual(int idx, const variable* buffer, ofstream & pop_ofs, const vector<std::streamoff> & offsets, int problem_size) {
-
-
-  std::streamoff pos = offsets[idx];
-  pop_ofs.seekp(pos, std::ios::beg);
-  pop_ofs.write(reinterpret_cast<const char*>(buffer),
-                sizeof(variable) * problem_size);
-  pop_ofs.flush();
+void saveIndividual(int idx, const variable* buffer, int pop_fd, int problem_size) {
+  uint64_t pos = (uint64_t) idx * sizeof(variable) * problem_size;
+  size_t bytes = sizeof(variable) * (size_t)problem_size;
+  ssize_t w = writeAtOffset(pop_fd, buffer, bytes, pos);
+  (void)w; // 可检查返回值并处理错误
 }
 
 Fitness UADE_MT::run()
@@ -95,10 +93,24 @@ Fitness UADE_MT::run()
   // fout.precision(dbl::max_digits10);
 
   //cout << scientific << setprecision(8);
-
-  string pop_file_path = "population.bin";
   initializeParameters();
   setSHADEParameters();
+
+  string pop_file_path = "population.bin";
+
+  uint64_t slot_bytes = (uint64_t)sizeof(variable) * problem_size;
+  uint64_t PREALLOC_BYTES = 600ULL * 1024ULL * 1024ULL * 1024ULL; // 600GB
+  atomic<std::size_t> next_slot(0);
+  uint64_t capacity = PREALLOC_BYTES / slot_bytes;
+  if (capacity == 0) capacity = 1;
+
+  int pop_fd = -1;
+  if (!preallocateFilePosix(pop_file_path, capacity * slot_bytes, pop_fd)) {
+    std::cerr << "Failed to create/preallocate `population.bin`\n";
+    return 0;
+  }
+  cout << pop_fd << endl;
+
   constexpr int batch_size = 100;
   vector<pair<Fitness, int>> pop;
   vector<Individual> children(batch_size, nullptr);
@@ -108,9 +120,6 @@ Fitness UADE_MT::run()
   variable bsf_solution[problem_size];
   vector<mt19937> generators;
 
-  ofstream pop_ofs(pop_file_path, ios::binary | ios::trunc);
-  vector<ifstream> pop_ifs;
-  vector<streamoff> offsets;
 
   random_device rd;
   Fitness bsf_fitness;
@@ -121,7 +130,6 @@ Fitness UADE_MT::run()
     benchmarks[i]->nextRun();
     children[i] = (variable*)malloc(sizeof(variable) * problem_size);
     generators.emplace_back(rd());
-    pop_ifs.emplace_back(pop_file_path, ios::binary);
   }
   //unordered_set<DoubleRegion> popset;
   //int duplicate_count = 0;
@@ -131,7 +139,7 @@ Fitness UADE_MT::run()
     //initialize population
     variable* indiv = makeNewIndividual();
     Fitness fit = eval_sol(indiv);
-    int disk_index = addIndividualToDisk(indiv, pop_ofs, offsets, problem_size);
+    int disk_index = addIndividualToDisk(indiv, pop_fd, next_slot, problem_size);
     free(indiv);
     pop.emplace_back(fit, disk_index);
     //children.push_back((variable *)malloc(sizeof(variable) * problem_size));
@@ -153,7 +161,7 @@ Fitness UADE_MT::run()
     if (i == 0 || fit < bsf_fitness) {
       bsf_fitness = fit;
       // bsf_solution 仍然需要一次性读回或用 indiv 直接拷
-      loadIndividual(disk_index, bsf_solution, pop_ifs[0], offsets, problem_size);
+      loadIndividual(disk_index, bsf_solution, pop_fd, problem_size);
     }
 
     ++nfes;
@@ -224,11 +232,13 @@ Fitness UADE_MT::run()
 #ifdef CHRONO
   using Clock = std::chrono::high_resolution_clock;
   auto t_loop_start = Clock::now();
+  auto last_time = Clock::now();
 #endif
   //main loop
   while (nfes < max_num_evaluations) {
 #ifdef CHRONO
     auto t_parallel_start = Clock::now();
+
     chrono::time_point<chrono::system_clock, chrono::system_clock::duration> t_p0_start, t_p1_start, t_p2_start;
 #endif
     //for (int target = 0; target < pop_size; target++)
@@ -266,8 +276,8 @@ Fitness UADE_MT::run()
       //p-best individual is randomly selected from the top pop_size *  p_i members
       //p_best_ind = rand() % p_num;
 
-      // int tournament = round((int)pop.size() / pop_ps[target]) * 10;
-      int tournament = 1;
+      int tournament = round((int)pop.size() / pop_ps[target]) * 10;
+      tournament = 1;
       // cout << tournament << endl;
       p_best_ind = (int)pop.size() - 1 - generators[target]() % (int)(pop.size() * p_best_rate); //v60
       for (int t = 1; t < tournament; t++)
@@ -320,7 +330,7 @@ Fitness UADE_MT::run()
       r2[target] = candidate[2];
 
 
-      operateCurrentToPBest1BinWithArchive(pop, pbests, children[target], base[target], p_best_ind, r1[target], r2[target], pop_sf[target], pop_cr[target], generators[target], pop_ifs[target], offsets);
+      operateCurrentToPBest1BinWithArchive(pop, pbests, children[target], base[target], p_best_ind, r1[target], r2[target], pop_sf[target], pop_cr[target], generators[target], pop_fd);
 
       // evaluate the children's fitness values
       children_fitness[target] = benchmarks[target]->compute(children[target]);
@@ -346,7 +356,7 @@ Fitness UADE_MT::run()
         if (nfes < max_num_evaluations) {
 
           //insert child to population
-          int new_idx = addIndividualToDisk(children[target], pop_ofs, offsets, problem_size);
+          int new_idx = addIndividualToDisk(children[target], pop_fd, next_slot, problem_size);
           //successful parameters are preserved in S_F and S_CR
           success_sf.push_back(pop_sf[target]);
           success_cr.push_back(pop_cr[target]);
@@ -359,8 +369,9 @@ Fitness UADE_MT::run()
 #ifdef CHRONO
     auto t_parallel_end = Clock::now();
 #endif
-    if (nfes % 10000 == 0) {
-      cout << "Function " << function_number << " Evaluation " << nfes <<" Population Size " << pop.size() << " Best " << bsf_fitness << " Time " << (long long)((chrono::duration<double>(t_parallel_end - t_parallel_start).count()) * 1000) << " ms" << endl;
+    if (nfes % 1000000 == 0) {
+      cout << "Function " << function_number << " Evaluation " << nfes <<" Population Size " << pop.size() << " Best " << bsf_fitness << " Time " << (long long)((chrono::duration<double>(Clock::now() - last_time).count()) * 1000) << " ms" << endl;
+      last_time = Clock::now();
     }
 
     if (bsf_fitness - optimum < epsilon) {
@@ -458,6 +469,7 @@ Fitness UADE_MT::run()
     free(itr->p);
   }*/
   fout.close();
+  if (pop_fd >= 0) close(pop_fd);
   for (int i = 0; i < batch_size; ++i)
     delete benchmarks[i];
   return bsf_fitness - optimum;
@@ -471,8 +483,7 @@ void UADE_MT::operateCurrentToPBest1BinWithArchive(const vector<pair<Fitness, in
                                       variable &scaling_factor,
                                       variable &cross_rate,
                                       mt19937 &generator,
-                                      ifstream& pop_ifs,
-                                      vector<streamoff>& offsets
+                                      int pop_fd
   )
 {
   vector<variable> buf_target(problem_size);
@@ -481,10 +492,10 @@ void UADE_MT::operateCurrentToPBest1BinWithArchive(const vector<pair<Fitness, in
   vector<variable> buf_r2(problem_size);
 
     // std::shared_lock<std::shared_mutex> rlock(popfile_mtx);
-    loadIndividual(pop[target].second, buf_target.data(), pop_ifs, offsets, problem_size);
-    loadIndividual(pop[p_best_individual].second, buf_pbest.data(), pop_ifs, offsets, problem_size);
-    loadIndividual(pop[r1].second, buf_r1.data(), pop_ifs, offsets, problem_size);
-    loadIndividual(pop[r2].second, buf_r2.data(), pop_ifs, offsets, problem_size);
+    loadIndividual(pop[target].second, buf_target.data(), pop_fd, problem_size);
+    loadIndividual(pop[p_best_individual].second, buf_pbest.data(), pop_fd, problem_size);
+    loadIndividual(pop[r1].second, buf_r1.data(), pop_fd, problem_size);
+    loadIndividual(pop[r2].second, buf_r2.data(), pop_fd, problem_size);
 
   int random_variable = generator() % problem_size;
   for (int i = 0; i < problem_size; i++) {

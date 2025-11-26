@@ -22,9 +22,9 @@ int main() {
   srand((unsigned)time(NULL));
   g_max_num_evaluations = 300000000;
 
-  int num_runs = 11;
+  int num_runs = 1;
 
-  for (int i = 0; i < 15; i++) {
+  for (int i = 0; i < 3; i++) {
     g_function_number = i + 1;
     set_func(g_function_number);
     cout << "\n-------------------------------------------------------" << endl;

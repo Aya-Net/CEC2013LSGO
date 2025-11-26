@@ -58,3 +58,9 @@ target_link_libraries(uade_mt2 benchmarks OpenMP::OpenMP_CXX)
 add_executable(uade_mt3 algorithms/uade_mt3.cpp algorithms/search_algorithm.cpp uade_mt_main.cpp)
 add_dependencies(uade_mt3 copy_cdatafiles)
 target_link_libraries(uade_mt3 benchmarks OpenMP::OpenMP_CXX)
+
+add_executable(uade_mt4 algorithms/uade_mt4.cpp algorithms/search_algorithm.cpp uade_mt_main.cpp)
+add_dependencies(uade_mt4 copy_cdatafiles)
+target_link_libraries(uade_mt4 benchmarks OpenMP::OpenMP_CXX)
+
+add_executable(test test_main.cpp)
