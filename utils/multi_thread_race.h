@@ -5,10 +5,8 @@
 #include <stdexcept>
 #include <shared_mutex>
 #include <mutex>
+#include <vector>
 
-// ===============================
-// 节点值：(val, id)
-// ===============================
 struct TValue {
     double val;
     int id;
@@ -35,7 +33,6 @@ inline bool lessThan(const TValue& a, const TValue& b) {
     return a.id < b.id;
 }
 
-// 按 key split：左子树 < key，右子树 >= key
 inline void split(Node* t, const TValue& key, Node*& a, Node*& b) {
     if (!t) { a = b = nullptr; return; }
     if (lessThan(t->v, key)) {
@@ -49,7 +46,6 @@ inline void split(Node* t, const TValue& key, Node*& a, Node*& b) {
     }
 }
 
-// merge 两棵 Treap（保证所有 a < 所有 b）
 inline Node* merge(Node* a, Node* b) {
     if (!a) return b;
     if (!b) return a;
@@ -64,86 +60,99 @@ inline Node* merge(Node* a, Node* b) {
     }
 }
 
-// 找第 k 小（1-based）
 inline TValue find_k(Node* t, int k) {
-    if (!t || k < 1 || k > sz(t)) {
+    if (!t || k < 0 || k >= sz(t)) {
         throw std::out_of_range("find_k: k out of range");
     }
     int left = sz(t->l);
-    if (k == left + 1) return t->v;
-    if (k <= left) return find_k(t->l, k);
+    if (k == left) return t->v;
+    if (k < left) return find_k(t->l, k);
     return find_k(t->r, k - left - 1);
 }
 
-// ===============================
-// 线程安全 top-y% 抽样器（多读单写）
-// ===============================
-class TopYTreapSampler {
+class TreapSamplerTS {
 private:
     Node* root = nullptr;
+    mutable std::shared_mutex mtx;
 
-    mutable std::shared_mutex mtx;   // 读写锁
-
-    std::mt19937 rng_;
+    std::mt19937 rng;
     std::uniform_int_distribution<int> prand;
     std::uniform_real_distribution<double> urand;
 
 public:
-    TopYTreapSampler()
+    TreapSamplerTS()
         : prand(1, 2000000000),
           urand(0.0, 1.0)
     {
-        rng_.seed(std::random_device{}());
+        rng.seed(std::random_device{}());
     }
 
-    ~TopYTreapSampler() {
-        // 简单递归释放（单线程销毁时调用）
+    ~TreapSamplerTS() {
         destroy(root);
     }
 
-    // 写：需要独占锁
     void insert(double val, int id) {
         std::unique_lock<std::shared_mutex> lock(mtx);
 
         TValue tv{val, id};
         Node *a, *b;
         split(root, tv, a, b);
-        Node* nw = new Node(val, id, prand(rng_));
+        Node* nw = new Node(val, id, prand(rng));
         root = merge(merge(a, nw), b);
     }
 
-    // 读：共享锁，多线程并发读安全
     int size() const {
         std::shared_lock<std::shared_mutex> lock(mtx);
         return sz(root);
     }
 
-    // 读：按 rank 查询第 k 小（1-based）
     TValue find_by_rank(int k) const {
         std::shared_lock<std::shared_mutex> lock(mtx);
         return find_k(root, k);
     }
 
-    // 读：从前 y_frac 部分，模拟“抽 x 次再取最小”
-    TValue sample_top_y_min(double y_frac, int x, std::mt19937 &rng) {
+    TValue sample_min_x(int x) const {
         std::shared_lock<std::shared_mutex> lock(mtx);
 
         int n = sz(root);
-        if (n == 0) throw std::runtime_error("no elements");
+        if (n == 0) throw std::runtime_error("sample_min_x: empty");
 
-        if (y_frac <= 0.0) y_frac = 0.0;
-        if (y_frac > 1.0)  y_frac = 1.0;
+        static thread_local std::mt19937 trng(std::random_device{}());
+        static thread_local std::uniform_real_distribution<double> uni(0.0, 1.0);
+
+        double U = uni(trng);
+        // 1-based: ceil(m - m*(1-U)^(1/x))
+        double rawK = n - n * std::pow(1.0 - U, 1.0 / x);
+        int K = (int)std::ceil(rawK) - 1; // 转 0-based
+
+        if (K < 0) K = 0;
+        if (K >= n) K = n - 1;
+
+        return find_k(root, K);
+    }
+
+    TValue sample_top_y_min(double y_frac, int x) const {
+        std::shared_lock<std::shared_mutex> lock(mtx);
+
+        int n = sz(root);
+        if (n == 0) return {0, -1};
+
+        if (y_frac <= 0) y_frac = 0;
+        if (y_frac > 1)  y_frac = 1;
 
         int m = (int)std::floor(y_frac * n);
         if (m < 1) m = 1;
 
-        double U = urand(const_cast<std::mt19937&>(rng));
+        thread_local std::mt19937 trng(std::random_device{}());
+        thread_local std::uniform_real_distribution<double> uni(0.0, 1.0);
 
-        // K = ceil(m - m * (1-U)^(1/x))
+        double U = uni(trng);
+
         double rawK = m - m * std::pow(1.0 - U, 1.0 / x);
-        int K = (int)std::ceil(rawK);
-        if (K < 1) K = 1;
-        if (K > m) K = m;
+        int K = (int)std::ceil(rawK) - 1;
+
+        if (K < 0) K = 0;
+        if (K >= m) K = m - 1;
 
         return find_k(root, K);
     }
@@ -154,5 +163,35 @@ private:
         destroy(t->l);
         destroy(t->r);
         delete t;
+    }
+};
+
+
+class TournamentSampler {
+private:
+    int mod;
+    TreapSamplerTS global;
+    std::vector<TreapSamplerTS> buckets;
+
+public:
+    TournamentSampler(int mod_)
+        : mod(mod_), buckets(mod_) {}
+
+    void insert(double val, int id) {
+        global.insert(val, id);
+
+        int b = id % mod;
+        if (b < 0) b += mod;
+        buckets[b].insert(val, id);
+    }
+
+    TValue sample_top_y_min(double y_frac, int x) const {
+        return global.sample_top_y_min(y_frac, x);
+    }
+
+    TValue sample_min_dpt(int x, int module) const {
+        int b = module % mod;
+        if (b < 0) b += mod;
+        return buckets[b].sample_min_x(x);
     }
 };
