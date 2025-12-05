@@ -6,6 +6,7 @@
 #include "de.h"
 #include "algorithms/lshade.h"
 #include "eval_func.h"
+#include <omp.h>
 
 int g_function_number;
 int g_problem_size = 1000;
@@ -17,8 +18,9 @@ double g_p_best_rate = 0.11;
 
 
 int main() {
+  omp_set_num_threads(16);
   srand((unsigned)time(NULL));
-  g_max_num_evaluations = 3000000;
+  g_max_num_evaluations = 100000000;
 
   int num_runs = 1;
 

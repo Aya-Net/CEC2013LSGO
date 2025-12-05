@@ -3,6 +3,8 @@
 //
 
 
+#include <omp.h>
+
 #include "Header.h"
 #include "de.h"
 #include "algorithms/shade.h"
@@ -19,11 +21,12 @@ double g_p_best_rate = 0.1;
 
 int main() {
   srand((unsigned)time(NULL));
-  g_max_num_evaluations = 3000000;
+  omp_set_num_threads(6);
+  g_max_num_evaluations = 68719476;
 
   int num_runs = 1;
 
-  for (int i = 0; i < 15; i++) {
+  for (int i = 0; i < 1; i++) {
     g_function_number = i + 1;
     set_func(g_function_number);
     cout << "\n-------------------------------------------------------" << endl;
