@@ -18,22 +18,26 @@ double g_p_best_rate = 0.11;
 
 
 int main() {
-  omp_set_num_threads(16);
+  omp_set_num_threads(6);
+  omp_set_max_active_levels(2);
   srand((unsigned)time(NULL));
-  g_max_num_evaluations = 300000000;
+  g_max_num_evaluations = 90000000;
 
-  int num_runs = 1;
+  int num_runs = 5;
+  int next_run[] = {1};
 
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 15; i++) {
     g_function_number = i + 1;
     set_func(g_function_number);
+
     cout << "\n-------------------------------------------------------" << endl;
     cout << "Function = " << g_function_number << ", Dimension size = " << g_problem_size << "\n" << endl;
     Fitness *bsf_fitness_array = (Fitness*)malloc(sizeof(Fitness) * num_runs);
     Fitness mean_bsf_fitness = 0;
     Fitness std_bsf_fitness = 0;
-
+    g_function_number = g_function_number * 5;
     for (int j = 0; j < num_runs; j++) {
+      g_function_number += 1;
       searchAlgorithm *alg = new UADE_MT();
       alg->setMinRegion(get_min_region());
       alg->setMaxRegion(get_max_region());
