@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.12)
 project(CEC2013LSGO)
 
 set(CMAKE_CXX_STANDARD 23)
+#O3 optimization
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 find_package(OpenMP REQUIRED)
 
@@ -37,11 +39,11 @@ target_link_libraries(demo2 benchmarks)
 
 add_executable(shade algorithms/shade.cpp algorithms/search_algorithm.cpp shade_main.cpp)
 add_dependencies(shade copy_cdatafiles)
-target_link_libraries(shade benchmarks)
+target_link_libraries(shade benchmarks OpenMP::OpenMP_CXX)
 
 add_executable(lshade algorithms/lshade.cpp algorithms/search_algorithm.cpp main.cpp)
 add_dependencies(lshade copy_cdatafiles)
-target_link_libraries(lshade benchmarks)
+target_link_libraries(lshade benchmarks OpenMP::OpenMP_CXX)
 
 add_executable(uade algorithms/uade.cpp algorithms/search_algorithm.cpp uade_main.cpp)
 add_dependencies(uade copy_cdatafiles)
@@ -59,8 +61,12 @@ add_executable(uade_mt3 algorithms/uade_mt3.cpp algorithms/search_algorithm.cpp 
 add_dependencies(uade_mt3 copy_cdatafiles)
 target_link_libraries(uade_mt3 benchmarks OpenMP::OpenMP_CXX)
 
-add_executable(uade_mt4 algorithms/uade_mt4.cpp algorithms/search_algorithm.cpp uade_mt_main.cpp)
+add_executable(uade_mt4 algorithms/uade_mt4.cpp algorithms/search_algorithm.cpp uade_mt_main.cpp Benchmarks.cpp eval_func.cpp ${BENCHMARK_FILES})
 add_dependencies(uade_mt4 copy_cdatafiles)
-target_link_libraries(uade_mt4 benchmarks OpenMP::OpenMP_CXX)
+target_link_libraries(uade_mt4 PRIVATE OpenMP::OpenMP_CXX)
+
+add_executable(uade_mt_ssd_async_io algorithms/uade_mt_ssd_async_io.cpp algorithms/search_algorithm.cpp uade_mt_main.cpp Benchmarks.cpp eval_func.cpp ${BENCHMARK_FILES})
+add_dependencies(uade_mt_ssd_async_io copy_cdatafiles)
+target_link_libraries(uade_mt_ssd_async_io PRIVATE OpenMP::OpenMP_CXX)
 
 add_executable(test test_main.cpp)
