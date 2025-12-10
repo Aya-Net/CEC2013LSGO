@@ -111,14 +111,11 @@ public:
         return find_k(root, k);
     }
 
-    TValue sample_min_x(int x) const {
+    TValue sample_min_x(int x, std::mt19937 &trng, std::uniform_real_distribution<double> &uni) const {
         std::shared_lock<std::shared_mutex> lock(mtx);
 
         int n = sz(root);
         if (n == 0) throw std::runtime_error("sample_min_x: empty");
-
-        static thread_local std::mt19937 trng(std::random_device{}());
-        static thread_local std::uniform_real_distribution<double> uni(0.0, 1.0);
 
         double U = uni(trng);
         // 1-based: ceil(m - m*(1-U)^(1/x))
@@ -131,7 +128,7 @@ public:
         return find_k(root, K);
     }
 
-    TValue sample_top_y_min(double y_frac, int x) const {
+    TValue sample_top_y_min(double y_frac, int x, std::mt19937 &trng, std::uniform_real_distribution<double> &uni) const {
         std::shared_lock<std::shared_mutex> lock(mtx);
 
         int n = sz(root);
@@ -143,8 +140,6 @@ public:
         int m = (int)std::floor(y_frac * n);
         if (m < 1) m = 1;
 
-        thread_local std::mt19937 trng(std::random_device{}());
-        thread_local std::uniform_real_distribution<double> uni(0.0, 1.0);
 
         double U = uni(trng);
 
@@ -185,13 +180,13 @@ public:
         buckets[b].insert(val, id);
     }
 
-    TValue sample_top_y_min(double y_frac, int x) const {
-        return global.sample_top_y_min(y_frac, x);
+    TValue sample_top_y_min(double y_frac, int x, std::mt19937 &trng, std::uniform_real_distribution<double> &uni) const {
+        return global.sample_top_y_min(y_frac, x, trng, uni);
     }
 
-    TValue sample_min_dpt(int x, int module) const {
+    TValue sample_min_dpt(int x, int module, std::mt19937 &trng, std::uniform_real_distribution<double> &uni) const {
         int b = module % mod;
         if (b < 0) b += mod;
-        return buckets[b].sample_min_x(x);
+        return buckets[b].sample_min_x(x, trng, uni);
     }
 };
